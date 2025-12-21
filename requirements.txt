@@ -1,34 +1,23 @@
-# ═══════════════════════════════════════════════════════════════════════════════
 # ICT PRO BOT V7.0 - Python Dependencies
-# ═══════════════════════════════════════════════════════════════════════════════
-
 # Web Framework
 Flask==3.0.0
 Werkzeug==3.0.1
-
 # HTTP Requests
 requests==2.31.0
 urllib3==2.1.0
-
 # JSON Processing
 simplejson==3.19.2
-
 # Date & Time
 python-dateutil==2.8.2
 pytz==2023.3
-
 # Environment Variables
 python-dotenv==1.0.0
-
 # Threading & Async
 gevent==23.9.1
-
 # Web Server (Production)
 gunicorn==21.2.0
-
 # Security
 cryptography==41.0.7
-
 # Optional: For advanced features
 # pandas==2.1.4
 # numpy==1.26.2
