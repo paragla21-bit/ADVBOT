@@ -97,17 +97,33 @@ def send_telegram_message(message, parse_mode='HTML'):
         logger.error(f"Send message error: {str(e)}")
         return False
 
+
+def safe_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if isinstance(value, str) and "{{" in value:
+            return default
+        return float(value)
+    except:
+        return default
+
 def format_buy_alert(data):
     symbol = data.get('symbol', 'N/A')
-    try:
-        price = float(data.get('price', 0))
-        sl = float(data.get('sl', 0))
-        tp = float(data.get('tp', 0))
-        qty = float(data.get('qty', 0))
-        risk = float(data.get('risk', 0))
-        rr = float(data.get('rr', 0))
-    except (ValueError, TypeError):
-        price = sl = tp = qty = risk = rr = 0.0
+
+    price = safe_float(data.get('price'))
+    sl = safe_float(data.get('sl'))
+    tp = safe_float(data.get('tp'))
+    qty = safe_float(data.get('qty'))
+    risk = safe_float(data.get('risk'))
+    rr = safe_float(data.get('rr'), 1)
+
+    # 🔥 FALLBACK LOGIC (MOST IMPORTANT)
+    if sl == 0 and risk > 0:
+        sl = price - risk
+
+    if tp == 0 and risk > 0:
+        tp = price + (risk * rr)
 
     confluence = data.get('confluence', 0)
     regime = data.get('regime', 'N/A')
@@ -143,15 +159,20 @@ def format_buy_alert(data):
 
 def format_sell_alert(data):
     symbol = data.get('symbol', 'N/A')
-    try:
-        price = float(data.get('price', 0))
-        sl = float(data.get('sl', 0))
-        tp = float(data.get('tp', 0))
-        qty = float(data.get('qty', 0))
-        risk = float(data.get('risk', 0))
-        rr = float(data.get('rr', 0))
-    except (ValueError, TypeError):
-        price = sl = tp = qty = risk = rr = 0.0
+
+    price = safe_float(data.get('price'))
+    sl = safe_float(data.get('sl'))
+    tp = safe_float(data.get('tp'))
+    qty = safe_float(data.get('qty'))
+    risk = safe_float(data.get('risk'))
+    rr = safe_float(data.get('rr'), 1)
+
+    # 🔥 FALLBACK LOGIC
+    if sl == 0 and risk > 0:
+        sl = price + risk
+
+    if tp == 0 and risk > 0:
+        tp = price - (risk * rr)
 
     confluence = data.get('confluence', 0)
     regime = data.get('regime', 'N/A')
@@ -184,6 +205,7 @@ def format_sell_alert(data):
 ━━━━━━━━━━━━━━━━━━━━━
 """
     return message.strip()
+
 
 def format_close_alert(data):
     symbol = data.get('symbol', 'N/A')
