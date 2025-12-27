@@ -1,84 +1,43 @@
 #!/usr/bin/env python3
 """
-ICT PRO BOT V7.0 - Telegram Alert System
-AUTO CODE GENERATION SYSTEM - No Manual Daily Generation Needed
+ICT PRO BOT V7.0 - FULL AUTO Upstox Token + Telegram Alerts + AUTO ORDER PLACEMENT
+Fully Optimized for Render.com Deployment
 """
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, redirect
 import requests
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 import logging
 import os
 from threading import Thread
 import time
-import secrets
-import hashlib
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION
+# CONFIGURATION - Environment Variables (Render.com में सेट करें)
 # ═══════════════════════════════════════════════════════════════════════════════
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8520294976:AAG7cvsDUECK2kbwIzqCCj3yRSeBPeY-4O8")
-CHAT_ID = os.environ.get("CHAT_ID", "7340945498")
+TELEGRAM_TOKEN = os.environ.get("8520294976:AAG7cvsDUECK2kbwIzqCCj3yRSeBPeY-4O8")
+CHAT_ID = os.environ.get("7340945498")
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+# Upstox Credentials (Render Environment में जरूर डालें)
+UPSTOX_API_KEY = os.environ.get("f476e97e-a6eb-403d-8456-be18142870f4")
+UPSTOX_API_SECRET = os.environ.get("qst633yx7w")
+UPSTOX_REDIRECT_URI = os.environ.get("UPSTOX_REDIRECT_URI", "https://advbot-b248.onrender.com/callback")
+
+# Global Access Token Storage
+access_token = None
+token_generated_at = None
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'ict-pro-bot-v7-2026'
 
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.FileHandler('trading_bot.log'),
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler()]
 )
 logger = logging.getLogger(__name__)
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# AUTO CODE GENERATION SYSTEM
-# ═══════════════════════════════════════════════════════════════════════════════
-class AutoCodeGenerator:
-    def __init__(self):
-        self.current_code = self.generate_daily_code()
-        self.code_date = datetime.now().date()
-        self.code_history = []
-        
-    def generate_daily_code(self):
-        """Generate unique secure code for today"""
-        today = datetime.now().strftime('%Y%m%d')
-        random_part = secrets.token_hex(4)
-        combined = f"{today}{random_part}"
-        hash_code = hashlib.sha256(combined.encode()).hexdigest()[:8].upper()
-        return f"ICT{today[-4:]}{hash_code}"
-    
-    def get_current_code(self):
-        """Get valid code - auto-regenerate if date changed"""
-        today = datetime.now().date()
-        if today != self.code_date:
-            self.code_history.append({
-                'code': self.current_code,
-                'date': self.code_date.isoformat(),
-                'expired': True
-            })
-            self.current_code = self.generate_daily_code()
-            self.code_date = today
-            logger.info(f"New daily code generated: {self.current_code}")
-        return self.current_code
-    
-    def validate_code(self, code):
-        """Validate if code is current"""
-        return code == self.get_current_code()
-    
-    def get_code_expiry(self):
-        """Get time until code expires"""
-        tomorrow = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
-        time_left = tomorrow - datetime.now()
-        hours = int(time_left.total_seconds() // 3600)
-        minutes = int((time_left.total_seconds() % 3600) // 60)
-        return f"{hours}h {minutes}m"
-
-code_generator = AutoCodeGenerator()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TRADE TRACKING
@@ -123,9 +82,12 @@ class TradeTracker:
 tracker = TradeTracker()
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TELEGRAM FUNCTIONS
+# TELEGRAM & HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 def send_telegram_message(message, parse_mode='HTML'):
+    if not TELEGRAM_TOKEN or not CHAT_ID:
+        logger.error("Telegram credentials missing!")
+        return False
     try:
         payload = {
             'chat_id': CHAT_ID,
@@ -135,21 +97,18 @@ def send_telegram_message(message, parse_mode='HTML'):
         }
         response = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
         if response.status_code == 200:
-            logger.info("Telegram message sent successfully")
+            logger.info("Telegram message sent")
             return True
         else:
-            logger.error(f"Telegram error: {response.status_code} - {response.text}")
+            logger.error(f"Telegram error: {response.text}")
             return False
     except Exception as e:
-        logger.error(f"Send message error: {str(e)}")
+        logger.error(f"Send error: {str(e)}")
         return False
-
 
 def safe_float(value, default=0.0):
     try:
-        if value is None:
-            return default
-        if isinstance(value, str) and "{{" in value:
+        if value is None or (isinstance(value, str) and "{{" in value):
             return default
         return float(value)
     except:
@@ -164,14 +123,13 @@ def format_buy_alert(data):
     risk = safe_float(data.get('risk'))
     rr = safe_float(data.get('rr'), 1)
 
-    if sl == 0 and risk > 0:
-        sl = price - risk
-    if tp == 0 and risk > 0:
-        tp = price + (risk * rr)
+    if sl == 0 and risk > 0: sl = price - risk
+    if tp == 0 and risk > 0: tp = price + (risk * rr)
 
     confluence = data.get('confluence', 0)
     regime = data.get('regime', 'N/A')
     killzone = data.get('killzone', 'N/A')
+
     risk_amount = abs(price - sl)
     reward_amount = abs(tp - price)
 
@@ -209,14 +167,13 @@ def format_sell_alert(data):
     risk = safe_float(data.get('risk'))
     rr = safe_float(data.get('rr'), 1)
 
-    if sl == 0 and risk > 0:
-        sl = price + risk
-    if tp == 0 and risk > 0:
-        tp = price - (risk * rr)
+    if sl == 0 and risk > 0: sl = price + risk
+    if tp == 0 and risk > 0: tp = price - (risk * rr)
 
     confluence = data.get('confluence', 0)
     regime = data.get('regime', 'N/A')
     killzone = data.get('killzone', 'N/A')
+
     risk_amount = abs(sl - price)
     reward_amount = abs(price - tp)
 
@@ -249,7 +206,7 @@ def format_close_alert(data):
     symbol = data.get('symbol', 'N/A')
     try:
         pnl_pct = float(data.get('pnl_percent', 0))
-    except (ValueError, TypeError):
+    except:
         pnl_pct = 0.0
     reason = data.get('reason', 'Target/SL Hit')
     emoji = "✅" if pnl_pct > 0 else "❌"
@@ -297,51 +254,125 @@ def format_daily_summary():
     return message.strip()
 
 # ═══════════════════════════════════════════════════════════════════════════════
+# UPSTOX TOKEN AUTO GENERATION
+# ═══════════════════════════════════════════════════════════════════════════════
+def generate_access_token(auth_code):
+    global access_token, token_generated_at
+    url = "https://api.upstox.com/v2/login/authorization/token"
+    data = {
+        'code': auth_code,
+        'client_id': UPSTOX_API_KEY,
+        'client_secret': UPSTOX_API_SECRET,
+        'redirect_uri': UPSTOX_REDIRECT_URI,
+        'grant_type': 'authorization_code'
+    }
+    headers = {'Content-Type': 'application/x-www-form-urlencoded'}
+    response = requests.post(url, data=data, headers=headers)
+    
+    if response.status_code == 200:
+        token_data = response.json()
+        access_token = token_data['access_token']
+        token_generated_at = datetime.now()
+        logger.info("Upstox Access Token Generated Successfully!")
+        send_telegram_message("✅ <b>Upstox Token Auto-Generated!</b>\nBot अब live trading के लिए ready है।")
+        return True
+    else:
+        logger.error(f"Token generation failed: {response.text}")
+        send_telegram_message(f"❌ Token generation failed:\n{response.text}")
+        return False
+
+def is_token_valid():
+    if not access_token or not token_generated_at:
+        return False
+    hours_elapsed = (datetime.now() - token_generated_at).total_seconds() / 3600
+    return hours_elapsed < 20  # 20 hours safe margin
+
+def get_token():
+    if is_token_valid():
+        return access_token
+    else:
+        send_telegram_message("⚠️ Token expired or missing.\nPlease visit /login to re-authenticate.")
+        return None
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# AUTO ORDER PLACEMENT (Upstox API)
+# ═══════════════════════════════════════════════════════════════════════════════
+def place_order(symbol, qty, order_type='MARKET', transaction_type='BUY', price=0):
+    token = get_token()
+    if not token:
+        logger.error("Cannot place order: Token not available")
+        return {"error": "Token not available. Visit /login"}
+
+    url = "https://api.upstox.com/v2/order/place"
+    headers = {
+        'Authorization': f'Bearer {token}',
+        'Content-Type': 'application/json',
+        'Accept': 'application/json'
+    }
+    payload = {
+        "quantity": int(qty),
+        "product": "I",  # Intraday
+        "order_type": order_type,
+        "transaction_type": transaction_type,
+        "trading_symbol": symbol,
+        "exchange": "NSE",  # Change if needed (BSE, NFO, etc.)
+        "validity": "DAY",
+        "disclosed_quantity": 0,
+        "trigger_price": 0,
+        "is_amo": False
+    }
+    if order_type == 'LIMIT':
+        payload["price"] = price
+
+    response = requests.post(url, headers=headers, json=payload)
+    if response.status_code == 200:
+        order_data = response.json()
+        logger.info(f"Order placed: {transaction_type} {symbol} - {order_data}")
+        send_telegram_message(f"📈 <b>ORDER PLACED</b>\n{transaction_type} {symbol} | Qty: {qty}\nOrder ID: {order_data.get('data', {}).get('order_id')}")
+        return order_data
+    else:
+        logger.error(f"Order failed: {response.text}")
+        send_telegram_message(f"❌ Order failed for {symbol}: {response.text}")
+        return {"error": response.text}
+
+# ═══════════════════════════════════════════════════════════════════════════════
 # ROUTES
 # ═══════════════════════════════════════════════════════════════════════════════
 @app.route('/')
 def home():
-    current_code = code_generator.get_current_code()
+    token_status = "✅ Active" if is_token_valid() else "❌ Expired/Missing"
     return jsonify({
+        'bot': 'ICT Pro Bot V7.0',
         'status': 'active',
-        'bot': 'ICT Pro Bot V7.0 - Auto Code System',
         'trades_today': tracker.daily_stats['total_trades'],
-        'current_code': current_code,
-        'code_expires_in': code_generator.get_code_expiry(),
-        'message': 'Use /getcode endpoint to get today\'s access code'
+        'upstox_token': token_status,
+        'login_url': f"{request.url_root}login"
     })
 
-@app.route('/getcode', methods=['GET'])
-def get_code():
-    """Get today's auto-generated access code"""
-    current_code = code_generator.get_current_code()
-    expiry = code_generator.get_code_expiry()
-    
-    message = f"""
-🔐 <b>TODAY'S ACCESS CODE</b> 🔐
-━━━━━━━━━━━━━━━━━━━━━
-📅 <b>Date:</b> {datetime.now().strftime('%d-%m-%Y')}
-🔑 <b>Code:</b> <code>{current_code}</code>
+@app.route('/login')
+def login():
+    if not UPSTOX_API_KEY or not UPSTOX_API_SECRET:
+        return "Error: Upstox credentials missing in environment!", 500
+    auth_url = (
+        "https://api.upstox.com/v2/login/authorization/dialog"
+        f"?response_type=code&client_id={UPSTOX_API_KEY}&redirect_uri={UPSTOX_REDIRECT_URI}"
+    )
+    return redirect(auth_url)
 
-⏰ <b>Valid For:</b> {expiry}
-🔄 <b>Auto-Renews:</b> Daily at 12:00 AM
-
-💡 <b>Usage:</b>
-Send POST to /webhook with:
-{{"code": "{current_code}", ...}}
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
-    
-    send_telegram_message(message)
-    
-    return jsonify({
-        'status': 'success',
-        'code': current_code,
-        'valid_until': expiry,
-        'date': datetime.now().strftime('%Y-%m-%d'),
-        'message': 'Code sent to Telegram'
-    })
+@app.route('/callback')
+def callback():
+    code = request.args.get('code')
+    if not code:
+        return "<h2>❌ Error: No authorization code received</h2>", 400
+    if generate_access_token(code):
+        return """
+        <h1 style="color:green;">✅ SUCCESS!</h1>
+        <h2>Upstox Token Generated!</h2>
+        <p>Bot अब live trading के लिए तैयार है।</p>
+        <p><a href="/">← Back</a></p>
+        """
+    else:
+        return "<h2 style='color:red;'>❌ Token Generation Failed</h2>", 500
 
 @app.route('/webhook', methods=['POST'])
 def webhook():
@@ -350,56 +381,58 @@ def webhook():
         if not data:
             return jsonify({'status': 'error', 'message': 'No data'}), 400
 
-        # Validate code if provided
-        provided_code = data.get('code')
-        if provided_code and not code_generator.validate_code(provided_code):
-            return jsonify({
-                'status': 'error', 
-                'message': 'Invalid or expired code. Use /getcode to get current code.'
-            }), 401
-
-        logger.info(f"Webhook received: {json.dumps(data)}")
         action = data.get('action', '').upper()
+        symbol = data.get('symbol')
+        qty = safe_float(data.get('qty'), 1)
+        price = safe_float(data.get('price'))
+
+        if not symbol:
+            return jsonify({'status': 'error', 'message': 'Symbol missing'}), 400
 
         if action == 'BUY':
             message = format_buy_alert(data)
             tracker.add_trade(data)
+            # Auto place BUY order
+            place_order(symbol, qty, 'MARKET', 'BUY')
         elif action == 'SELL':
             message = format_sell_alert(data)
             tracker.add_trade(data)
+            # Auto place SELL order
+            place_order(symbol, qty, 'MARKET', 'SELL')
         elif action in ['CLOSE', 'PARTIAL_CLOSE']:
-            pnl_pct = float(data.get('pnl_percent', 0))
+            pnl_pct = safe_float(data.get('pnl_percent', 0))
             tracker.update_pnl(pnl_pct)
             message = format_close_alert(data)
         else:
             return jsonify({'status': 'error', 'message': 'Unknown action'}), 400
 
         send_telegram_message(message)
-        return jsonify({'status': 'success', 'action': action}), 200
-
+        return jsonify({'status': 'success'}), 200
     except Exception as e:
         logger.error(f"Webhook error: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+        return jsonify({'error': str(e)}), 500
 
+@app.route('/test-buy', methods=['GET'])
+def test_buy():
+    place_order('RELIANCE', 1, 'MARKET', 'BUY')
+    return jsonify({'status': 'Test BUY order placed'})
+
+@app.route('/test-sell', methods=['GET'])
+def test_sell():
+    place_order('RELIANCE', 1, 'MARKET', 'SELL')
+    return jsonify({'status': 'Test SELL order placed'})
+
+# बाकी routes (test, stats, summary) same as before
 @app.route('/test', methods=['GET'])
 def test_alert():
     test_data = {
-        'action': 'BUY',
-        'symbol': 'RELIANCE',
-        'price': 2450.50,
-        'sl': 2400.00,
-        'tp': 2650.00,
-        'qty': 10,
-        'risk': 500.00,
-        'rr': 4.0,
-        'regime': 'TRENDING',
-        'confluence': 12,
-        'killzone': 'NSE/BSE Session',
-        'code': code_generator.get_current_code()
+        'action': 'BUY', 'symbol': 'RELIANCE', 'price': 2450.50, 'sl': 2400.00,
+        'tp': 2650.00, 'qty': 1, 'risk': 500.00, 'rr': 4.0,
+        'regime': 'TRENDING', 'confluence': 12, 'killzone': 'NSE Session'
     }
     message = format_buy_alert(test_data)
     send_telegram_message(message)
-    return jsonify({'status': 'success', 'message': 'Test alert sent'})
+    return jsonify({'status': 'Test alert sent'})
 
 @app.route('/stats', methods=['GET'])
 def get_stats():
@@ -407,8 +440,7 @@ def get_stats():
         'daily_stats': tracker.daily_stats,
         'win_rate': tracker.get_win_rate(),
         'total_trades': len(tracker.trades),
-        'current_code': code_generator.get_current_code(),
-        'code_expires_in': code_generator.get_code_expiry()
+        'upstox_token_valid': is_token_valid()
     })
 
 @app.route('/summary', methods=['POST'])
@@ -421,62 +453,30 @@ def daily_summary():
 # ═══════════════════════════════════════════════════════════════════════════════
 # BACKGROUND TASKS
 # ═══════════════════════════════════════════════════════════════════════════════
-def daily_code_announcer():
-    """Announce new code every morning"""
-    while True:
-        now = datetime.now()
-        # Send new code at 9:00 AM every day
-        if now.hour == 9 and now.minute == 0:
-            current_code = code_generator.get_current_code()
-            message = f"""
-🌅 <b>GOOD MORNING!</b> 🌅
-━━━━━━━━━━━━━━━━━━━━━
-📅 <b>{datetime.now().strftime('%A, %d %B %Y')}</b>
-
-🔑 <b>Today's Access Code:</b>
-<code>{current_code}</code>
-
-✅ Ready for trading signals!
-🤖 ICT PRO BOT V7.0 Active
-
-━━━━━━━━━━━━━━━━━━━━━
-"""
-            send_telegram_message(message)
-            time.sleep(60)
-        time.sleep(30)
-
 def daily_summary_scheduler():
-    """Send summary at market close"""
     while True:
         now = datetime.now()
         if now.hour == 15 and now.minute == 30:
             message = format_daily_summary()
             send_telegram_message(message)
             tracker.reset_daily_stats()
-            time.sleep(60)
+            time.sleep(70)
         time.sleep(30)
 
 def send_startup_message():
-    current_code = code_generator.get_current_code()
     message = f"""
 🤖 <b>ICT PRO BOT V7.0 STARTED</b> 🤖
 ━━━━━━━━━━━━━━━━━━━━━
-✅ <b>Status:</b> Active & Running
-📅 <b>{datetime.now().strftime('%d-%m-%Y %H:%M:%S')}</b>
-
-🔐 <b>Auto Code System:</b> ENABLED
-🔑 <b>Current Code:</b> <code>{current_code}</code>
-⏰ <b>Expires In:</b> {code_generator.get_code_expiry()}
-
-📱 <b>Ready for Live Signals!</b>
-🔄 <b>Code Auto-Renews Daily</b>
+✅ Status: Running
+📅 {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
+🔑 Token: {'✅ Valid' if is_token_valid() else '❌ Login Required → /login'}
+📈 Auto Trading: ENABLED
 ━━━━━━━━━━━━━━━━━━━━━
 """
     send_telegram_message(message)
 
 if __name__ == '__main__':
     send_startup_message()
-    Thread(target=daily_code_announcer, daemon=True).start()
     Thread(target=daily_summary_scheduler, daemon=True).start()
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
