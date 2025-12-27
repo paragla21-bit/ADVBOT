@@ -16,13 +16,13 @@ import time
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION - Environment Variables (Render.com में सेट करें)
 # ═══════════════════════════════════════════════════════════════════════════════
-TELEGRAM_TOKEN = os.environ.get("8520294976:AAG7cvsDUECK2kbwIzqCCj3yRSeBPeY-4O8")
-CHAT_ID = os.environ.get("7340945498")
+TELEGRAM_TOKEN = os.environ.get("8520294976:AAG7cvsDUECK2kbwIzqCCj3yRSeBPeY-4O8")          # ← सही तरीका: key name
+CHAT_ID = os.environ.get("7340945498")                        # ← key name
 TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-# Upstox Credentials (Render Environment में जरूर डालें)
-UPSTOX_API_KEY = os.environ.get("f476e97e-a6eb-403d-8456-be18142870f4")
-UPSTOX_API_SECRET = os.environ.get("qst633yx7w")
+# Upstox Credentials - Render Environment Variables से लोड होंगे
+UPSTOX_API_KEY = os.environ.get("f476e97e-a6eb-403d-8456-be18142870f4")          # ← key name
+UPSTOX_API_SECRET = os.environ.get("qst633yx7w")    # ← key name
 UPSTOX_REDIRECT_URI = os.environ.get("UPSTOX_REDIRECT_URI", "https://advbot-b248.onrender.com/callback")
 
 # Global Access Token Storage
