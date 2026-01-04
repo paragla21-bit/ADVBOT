@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-ICT PRO BOT V7.0 - FULL AUTO Upstox Token + Telegram Alerts + AUTO ORDER PLACEMENT
-Fully Optimized for Render.com Deployment
+ICT PRO BOT V7.4 - FULL AUTO Upstox + SL/TP/PARTIAL/REVERSAL + Token Auto + Telegram + State Persistence
+Optimized for Render.com | Full Lifecycle Order Management | Matches Pine Script V7.4 Webhook Format
 """
 
 from flask import Flask, request, jsonify, redirect
@@ -12,81 +12,68 @@ import logging
 import os
 from threading import Thread
 import time
+import signal
+import sys
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION - Environment Variables (Render.com में सेट करें)
 # ═══════════════════════════════════════════════════════════════════════════════
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")          # ← key name
-CHAT_ID = os.environ.get("CHAT_ID")                        # ← key name
-TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+TELEGRAM_API_URL = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage" if TELEGRAM_TOKEN else ""
 
 # Upstox Credentials
-UPSTOX_API_KEY = os.environ.get("UPSTOX_API_KEY")          # ← key name
-UPSTOX_API_SECRET = os.environ.get("UPSTOX_API_SECRET")    # ← key name
-UPSTOX_REDIRECT_URI = os.environ.get("UPSTOX_REDIRECT_URI", "https://advbot-b248.onrender.com/callback")
+UPSTOX_API_KEY = os.environ.get("UPSTOX_API_KEY")
+UPSTOX_API_SECRET = os.environ.get("UPSTOX_API_SECRET")
+UPSTOX_REDIRECT_URI = os.environ.get("UPSTOX_REDIRECT_URI", "https://your-render-url.onrender.com/callback")
 
-# Global Access Token Storage
+# Global State
 access_token = None
 token_generated_at = None
+active_positions = {}  # symbol → full state dict
 
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'ict-pro-bot-v7-2026'
+app.config['SECRET_KEY'] = 'ict-pro-bot-v7-4-full-lifecycle'
 
+# Logging
+if not os.path.exists("logs"):
+    os.makedirs("logs")
 logging.basicConfig(
+    filename=f"logs/trade_log_{datetime.now().strftime('%Y%m%d')}.txt",
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[logging.StreamHandler()]
+    format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+logger.addHandler(logging.StreamHandler())
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TRADE TRACKING
+# STATE MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
-class TradeTracker:
-    def __init__(self):
-        self.trades = []
-        self.daily_stats = {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'total_pnl': 0.0,
-            'start_time': datetime.now()
-        }
-    
-    def add_trade(self, trade_data):
-        self.trades.append({'timestamp': datetime.now().isoformat(), 'data': trade_data})
-        self.daily_stats['total_trades'] += 1
-        logger.info(f"Trade added: {trade_data.get('symbol')} - {trade_data.get('action')}")
+def save_positions():
+    try:
+        with open("positions.json", "w") as f:
+            json.dump(active_positions, f)
+        logger.info("Positions saved to disk")
+    except Exception as e:
+        logger.error(f"Failed to save positions: {e}")
 
-    def update_pnl(self, pnl):
-        self.daily_stats['total_pnl'] += pnl
-        if pnl > 0:
-            self.daily_stats['winning_trades'] += 1
-        else:
-            self.daily_stats['losing_trades'] += 1
+def load_positions():
+    global active_positions
+    try:
+        if os.path.exists("positions.json"):
+            with open("positions.json", "r") as f:
+                active_positions = json.load(f)
+            logger.info(f"Restored {len(active_positions)} positions from disk")
+    except Exception as e:
+        logger.error(f"Position restore failed: {e}")
 
-    def get_win_rate(self):
-        total = self.daily_stats['total_trades']
-        return (self.daily_stats['winning_trades'] / total) * 100 if total > 0 else 0
-
-    def reset_daily_stats(self):
-        self.daily_stats = {
-            'total_trades': 0,
-            'winning_trades': 0,
-            'losing_trades': 0,
-            'total_pnl': 0.0,
-            'start_time': datetime.now()
-        }
-        logger.info("Daily stats reset")
-
-tracker = TradeTracker()
+load_positions()
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # TELEGRAM & HELPER FUNCTIONS
 # ═══════════════════════════════════════════════════════════════════════════════
 def send_telegram_message(message, parse_mode='HTML'):
     if not TELEGRAM_TOKEN or not CHAT_ID:
-        logger.error("Telegram credentials missing!")
         return False
     try:
         payload = {
@@ -96,19 +83,13 @@ def send_telegram_message(message, parse_mode='HTML'):
             'disable_web_page_preview': True
         }
         response = requests.post(TELEGRAM_API_URL, json=payload, timeout=10)
-        if response.status_code == 200:
-            logger.info("Telegram message sent")
-            return True
-        else:
-            logger.error(f"Telegram error: {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"Send error: {str(e)}")
+        return response.status_code == 200
+    except:
         return False
 
 def safe_float(value, default=0.0):
     try:
-        if value is None or (isinstance(value, str) and "{{" in value):
+        if value is None or (isinstance(value, str) and ("{" in str(value) or "}" in str(value))):
             return default
         return float(value)
     except:
@@ -202,57 +183,6 @@ def format_sell_alert(data):
 """
     return message.strip()
 
-def format_close_alert(data):
-    symbol = data.get('symbol', 'N/A')
-    try:
-        pnl_pct = float(data.get('pnl_percent', 0))
-    except:
-        pnl_pct = 0.0
-    reason = data.get('reason', 'Target/SL Hit')
-    emoji = "✅" if pnl_pct > 0 else "❌"
-    status = "PROFIT" if pnl_pct > 0 else "LOSS"
-
-    message = f"""
-{emoji} <b>TRADE CLOSED - {status}</b> {emoji}
-━━━━━━━━━━━━━━━━━━━━━
-📊 <b>{symbol}</b>
-💰 <b>P&L:</b> {pnl_pct:+.2f}%
-📝 <b>Reason:</b> {reason}
-
-📈 <b>Daily Stats:</b>
-• Total Trades: {tracker.daily_stats['total_trades']}
-• Win Rate: {tracker.get_win_rate():.1f}%
-• Total P&L: ₹{tracker.daily_stats['total_pnl']:+.2f}
-
-⏰ {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
-━━━━━━━━━━━━━━━━━━━━━
-"""
-    return message.strip()
-
-def format_daily_summary():
-    win_rate = tracker.get_win_rate()
-    message = f"""
-📊 <b>DAILY TRADING SUMMARY</b> 📊
-━━━━━━━━━━━━━━━━━━━━━
-📅 <b>{datetime.now().strftime('%d-%m-%Y')}</b>
-
-✅ <b>Performance:</b>
-• Total Trades: {tracker.daily_stats['total_trades']}
-• Winning Trades: {tracker.daily_stats['winning_trades']} ✅
-• Losing Trades: {tracker.daily_stats['losing_trades']} ❌
-• Win Rate: {win_rate:.1f}%
-
-💰 <b>P&L:</b> ₹{tracker.daily_stats['total_pnl']:+.2f}
-
-⏰ <b>Session:</b>
-• Started: {tracker.daily_stats['start_time'].strftime('%H:%M:%S')}
-• Ended: {datetime.now().strftime('%H:%M:%S')}
-
-🤖 <b>ICT PRO BOT V7.0</b>
-━━━━━━━━━━━━━━━━━━━━━
-"""
-    return message.strip()
-
 # ═══════════════════════════════════════════════════════════════════════════════
 # UPSTOX TOKEN AUTO GENERATION
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -278,30 +208,25 @@ def generate_access_token(auth_code):
         return True
     else:
         logger.error(f"Token generation failed: {response.text}")
-        send_telegram_message(f"❌ Token generation failed:\n{response.text}")
         return False
 
 def is_token_valid():
     if not access_token or not token_generated_at:
         return False
     hours_elapsed = (datetime.now() - token_generated_at).total_seconds() / 3600
-    return hours_elapsed < 20  # 20 hours safe margin
+    return hours_elapsed < 20
 
 def get_token():
-    if is_token_valid():
-        return access_token
-    else:
-        send_telegram_message("⚠️ Token expired or missing.\nPlease visit /login to re-authenticate.")
-        return None
+    return access_token if is_token_valid() else None
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# AUTO ORDER PLACEMENT (Upstox API)
+# ORDER MANAGEMENT
 # ═══════════════════════════════════════════════════════════════════════════════
-def place_order(symbol, qty, order_type='MARKET', transaction_type='BUY', price=0):
+def place_order(order_data, label="Order"):
     token = get_token()
     if not token:
-        logger.error("Cannot place order: Token not available")
-        return {"error": "Token not available. Visit /login"}
+        logger.error("Cannot place order: Token missing")
+        return {"success": False, "error": "Token missing"}
 
     url = "https://api.upstox.com/v2/order/place"
     headers = {
@@ -309,42 +234,226 @@ def place_order(symbol, qty, order_type='MARKET', transaction_type='BUY', price=
         'Content-Type': 'application/json',
         'Accept': 'application/json'
     }
-    payload = {
-        "quantity": int(qty),
-        "product": "I",  # Intraday
-        "order_type": order_type,
-        "transaction_type": transaction_type,
-        "trading_symbol": symbol,
-        "exchange": "NSE",  # Change if needed (BSE, NFO, etc.)
-        "validity": "DAY",
-        "disclosed_quantity": 0,
-        "trigger_price": 0,
-        "is_amo": False
+    response = requests.post(url, headers=headers, json=order_data, timeout=10)
+    result = response.json()
+    order_id = result.get('data', {}).get('order_id')
+    success = response.status_code == 200 and result.get('status') == 'success'
+    
+    log_msg = f"{label} {'SUCCESS' if success else 'FAILED'} | ID: {order_id} | Symbol: {order_data.get('trading_symbol')}"
+    logger.info(log_msg)
+    if success and TELEGRAM_TOKEN:
+        send_telegram_message(f"✅ {label}: {order_data.get('trading_symbol')} | Qty: {order_data.get('quantity')} | ID: {order_id}")
+    
+    return {
+        "success": success,
+        "order_id": order_id,
+        "raw": result,
+        "timestamp": time.time()
     }
-    if order_type == 'LIMIT':
-        payload["price"] = price
 
-    response = requests.post(url, headers=headers, json=payload)
-    if response.status_code == 200:
-        order_data = response.json()
-        logger.info(f"Order placed: {transaction_type} {symbol} - {order_data}")
-        send_telegram_message(f"📈 <b>ORDER PLACED</b>\n{transaction_type} {symbol} | Qty: {qty}\nOrder ID: {order_data.get('data', {}).get('order_id')}")
-        return order_data
-    else:
-        logger.error(f"Order failed: {response.text}")
-        send_telegram_message(f"❌ Order failed for {symbol}: {response.text}")
-        return {"error": response.text}
+def cancel_order(order_id):
+    if not order_id or not get_token():
+        return
+    try:
+        url = f"https://api.upstox.com/v2/order/cancel?order_id={order_id}"
+        headers = {'Authorization': f'Bearer {get_token()}'}
+        requests.delete(url, headers=headers, timeout=10)
+        logger.info(f"Cancelled order: {order_id}")
+    except Exception as e:
+        logger.error(f"Cancel failed {order_id}: {e}")
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# ROUTES
+# INSTRUMENT KEY LOADER
+# ═══════════════════════════════════════════════════════════════════════════════
+instruments_dict = {}
+
+def load_instruments():
+    global instruments_dict
+    try:
+        url = "https://assets.upstox.com/market-quote/instruments/exchange/bod.json"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+        for key, info in data.items():
+            if info.get('segment') == 'NSE_EQ':
+                instruments_dict[info['trading_symbol'].upper()] = key
+        logger.info(f"Loaded {len(instruments_dict)} NSE instruments")
+    except Exception as e:
+        logger.error(f"Instruments load failed: {e}")
+
+load_instruments()
+
+def get_instrument_key(symbol):
+    return instruments_dict.get(symbol.upper())
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# WEBHOOK HANDLER - FULL LIFECYCLE
+# ═══════════════════════════════════════════════════════════════════════════════
+@app.route('/webhook', methods=['POST'])
+def webhook():
+    global active_positions
+    try:
+        data = request.get_json(force=True)
+        if not data:
+            return jsonify({'error': 'No data'}), 400
+
+        action = data.get('action', '').upper()
+        symbol_raw = data.get('symbol', '')
+        symbol = symbol_raw.replace("-EQ", "").replace("NSE:", "").strip().upper()
+        qty = max(1, int(round(safe_float(data.get('qty', 1)))))
+        sl_price = safe_float(data.get('sl'))
+        tp_price = safe_float(data.get('tp'))
+        partial_tp_price = safe_float(data.get('partial_tp'))
+
+        if action not in ["BUY", "SELL"]:
+            return jsonify({'error': 'Invalid action'}), 400
+
+        instrument_key = get_instrument_key(symbol)
+        if not instrument_key:
+            return jsonify({'error': f'Symbol {symbol} not found in NSE_EQ'}), 400
+
+        opposite_action = "SELL" if action == "BUY" else "BUY"
+
+        # 🔁 Reversal: Square off existing
+        if symbol in active_positions:
+            logger.info(f"🔁 Reversal: squaring off {symbol}")
+            pos = active_positions[symbol]
+            for oid in [pos.get('sl_order_id'), pos.get('tp_order_id'), pos.get('partial_order_id')]:
+                cancel_order(oid)
+            exit_order = {
+                "quantity": pos['filled_qty'],
+                "product": "I",
+                "validity": "DAY",
+                "price": 0,
+                "instrument_token": instrument_key,
+                "order_type": "MARKET",
+                "transaction_type": opposite_action,
+                "disclosed_quantity": 0,
+                "trigger_price": 0,
+                "is_amo": False
+            }
+            place_order(exit_order, "REVERSAL EXIT")
+            del active_positions[symbol]
+
+        # 📤 ENTRY
+        entry_order_data = {
+            "quantity": qty,
+            "product": "I",
+            "validity": "DAY",
+            "price": 0,
+            "instrument_token": instrument_key,
+            "order_type": "MARKET",
+            "transaction_type": action,
+            "disclosed_quantity": 0,
+            "trigger_price": 0,
+            "is_amo": False
+        }
+        entry_res = place_order(entry_order_data, "ENTRY")
+        if not entry_res["success"]:
+            return jsonify({'error': 'Entry order failed'}), 500
+
+        position_state = {
+            "symbol": symbol,
+            "action": action,
+            "qty_requested": qty,
+            "filled_qty": qty,
+            "entry_order_id": entry_res["order_id"],
+            "entry_order_data": entry_order_data,
+            "sl_order_id": None,
+            "tp_order_id": None,
+            "partial_order_id": None,
+            "sl_order_data": None,
+            "tp_order_data": None,
+            "partial_order_data": None,
+            "created_at": time.time()
+        }
+
+        # 📈 Partial TP (50%)
+        if partial_tp_price and qty >= 2:
+            partial_qty = qty // 2
+            partial_order_data = {
+                "quantity": partial_qty,
+                "product": "I",
+                "validity": "DAY",
+                "price": round(partial_tp_price, 2),
+                "instrument_token": instrument_key,
+                "order_type": "LIMIT",
+                "transaction_type": opposite_action,
+                "disclosed_quantity": 0,
+                "trigger_price": 0,
+                "is_amo": False
+            }
+            partial_res = place_order(partial_order_data, "PARTIAL TP")
+            if partial_res["success"]:
+                position_state["partial_order_id"] = partial_res["order_id"]
+                position_state["partial_order_data"] = partial_order_data
+
+        # 📉 Full TP
+        if tp_price:
+            full_qty = qty - (qty // 2 if partial_tp_price else 0)
+            if full_qty > 0:
+                tp_order_data = {
+                    "quantity": full_qty,
+                    "product": "I",
+                    "validity": "DAY",
+                    "price": round(tp_price, 2),
+                    "instrument_token": instrument_key,
+                    "order_type": "LIMIT",
+                    "transaction_type": opposite_action,
+                    "disclosed_quantity": 0,
+                    "trigger_price": 0,
+                    "is_amo": False
+                }
+                tp_res = place_order(tp_order_data, "FULL TP")
+                if tp_res["success"]:
+                    position_state["tp_order_id"] = tp_res["order_id"]
+                    position_state["tp_order_data"] = tp_order_data
+
+        # 🛑 SL (SL-M)
+        if sl_price:
+            sl_order_data = {
+                "quantity": qty,
+                "product": "I",
+                "validity": "DAY",
+                "price": 0,
+                "instrument_token": instrument_key,
+                "order_type": "SL-M",
+                "transaction_type": opposite_action,
+                "disclosed_quantity": 0,
+                "trigger_price": round(sl_price, 2),
+                "is_amo": False
+            }
+            sl_res = place_order(sl_order_data, "STOP LOSS")
+            if sl_res["success"]:
+                position_state["sl_order_id"] = sl_res["order_id"]
+                position_state["sl_order_data"] = sl_order_data
+
+        active_positions[symbol] = position_state
+        save_positions()
+        logger.info(f"Position opened: {symbol} | Active: {list(active_positions.keys())}")
+
+        # Telegram Alert
+        if action == "BUY":
+            message = format_buy_alert(data)
+        else:
+            message = format_sell_alert(data)
+        send_telegram_message(message)
+
+        return jsonify({"status": "Processed", "symbol": symbol}), 200
+
+    except Exception as e:
+        logger.error(f"Webhook error: {str(e)}")
+        return jsonify({'error': str(e)}), 500
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# ROUTES - AUTH, TEST, STATS
 # ═══════════════════════════════════════════════════════════════════════════════
 @app.route('/')
 def home():
     token_status = "✅ Active" if is_token_valid() else "❌ Expired/Missing"
     return jsonify({
-        'bot': 'ICT Pro Bot V7.0',
+        'bot': 'ICT Pro Bot V7.4',
         'status': 'active',
-        'trades_today': tracker.daily_stats['total_trades'],
+        'trades_today': len([t for t in active_positions]),
         'upstox_token': token_status,
         'login_url': f"{request.url_root}login"
     })
@@ -352,7 +461,7 @@ def home():
 @app.route('/login')
 def login():
     if not UPSTOX_API_KEY or not UPSTOX_API_SECRET:
-        return "Error: Upstox credentials missing in environment!", 500
+        return "Error: Upstox credentials missing!", 500
     auth_url = (
         "https://api.upstox.com/v2/login/authorization/dialog"
         f"?response_type=code&client_id={UPSTOX_API_KEY}&redirect_uri={UPSTOX_REDIRECT_URI}"
@@ -363,7 +472,7 @@ def login():
 def callback():
     code = request.args.get('code')
     if not code:
-        return "<h2>❌ Error: No authorization code received</h2>", 400
+        return "<h2>❌ Error: No authorization code</h2>", 400
     if generate_access_token(code):
         return """
         <h1 style="color:green;">✅ SUCCESS!</h1>
@@ -374,61 +483,11 @@ def callback():
     else:
         return "<h2 style='color:red;'>❌ Token Generation Failed</h2>", 500
 
-@app.route('/webhook', methods=['POST'])
-def webhook():
-    try:
-        data = request.get_json(force=True)
-        if not data:
-            return jsonify({'status': 'error', 'message': 'No data'}), 400
-
-        action = data.get('action', '').upper()
-        symbol = data.get('symbol')
-        qty = safe_float(data.get('qty'), 1)
-        price = safe_float(data.get('price'))
-
-        if not symbol:
-            return jsonify({'status': 'error', 'message': 'Symbol missing'}), 400
-
-        if action == 'BUY':
-            message = format_buy_alert(data)
-            tracker.add_trade(data)
-            # Auto place BUY order
-            place_order(symbol, qty, 'MARKET', 'BUY')
-        elif action == 'SELL':
-            message = format_sell_alert(data)
-            tracker.add_trade(data)
-            # Auto place SELL order
-            place_order(symbol, qty, 'MARKET', 'SELL')
-        elif action in ['CLOSE', 'PARTIAL_CLOSE']:
-            pnl_pct = safe_float(data.get('pnl_percent', 0))
-            tracker.update_pnl(pnl_pct)
-            message = format_close_alert(data)
-        else:
-            return jsonify({'status': 'error', 'message': 'Unknown action'}), 400
-
-        send_telegram_message(message)
-        return jsonify({'status': 'success'}), 200
-    except Exception as e:
-        logger.error(f"Webhook error: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/test-buy', methods=['GET'])
-def test_buy():
-    place_order('RELIANCE', 1, 'MARKET', 'BUY')
-    return jsonify({'status': 'Test BUY order placed'})
-
-@app.route('/test-sell', methods=['GET'])
-def test_sell():
-    place_order('RELIANCE', 1, 'MARKET', 'SELL')
-    return jsonify({'status': 'Test SELL order placed'})
-
-# बाकी routes (test, stats, summary) same as before
 @app.route('/test', methods=['GET'])
 def test_alert():
     test_data = {
-        'action': 'BUY', 'symbol': 'RELIANCE', 'price': 2450.50, 'sl': 2400.00,
-        'tp': 2650.00, 'qty': 1, 'risk': 500.00, 'rr': 4.0,
-        'regime': 'TRENDING', 'confluence': 12, 'killzone': 'NSE Session'
+        'action': 'BUY', 'symbol': 'RELIANCE-EQ', 'qty': 1,
+        'sl': 2950.00, 'tp': 3100.00, 'partial_tp': 3025.00
     }
     message = format_buy_alert(test_data)
     send_telegram_message(message)
@@ -437,46 +496,37 @@ def test_alert():
 @app.route('/stats', methods=['GET'])
 def get_stats():
     return jsonify({
-        'daily_stats': tracker.daily_stats,
-        'win_rate': tracker.get_win_rate(),
-        'total_trades': len(tracker.trades),
+        'active_positions': len(active_positions),
+        'positions': list(active_positions.keys()),
         'upstox_token_valid': is_token_valid()
     })
 
-@app.route('/summary', methods=['POST'])
-def daily_summary():
-    message = format_daily_summary()
-    send_telegram_message(message)
-    tracker.reset_daily_stats()
-    return jsonify({'status': 'success'})
+# ═══════════════════════════════════════════════════════════════════════════════
+# GRACEFUL SHUTDOWN
+# ═══════════════════════════════════════════════════════════════════════════════
+def graceful_shutdown(signum, frame):
+    logger.info("🛑 Shutting down... Cancelling all active orders")
+    for symbol, pos in active_positions.items():
+        for oid in [pos.get('sl_order_id'), pos.get('tp_order_id'), pos.get('partial_order_id')]:
+            cancel_order(oid)
+    sys.exit(0)
+
+signal.signal(signal.SIGINT, graceful_shutdown)
+signal.signal(signal.SIGTERM, graceful_shutdown)
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# BACKGROUND TASKS
+# START
 # ═══════════════════════════════════════════════════════════════════════════════
-def daily_summary_scheduler():
-    while True:
-        now = datetime.now()
-        if now.hour == 15 and now.minute == 30:
-            message = format_daily_summary()
-            send_telegram_message(message)
-            tracker.reset_daily_stats()
-            time.sleep(70)
-        time.sleep(30)
-
-def send_startup_message():
-    message = f"""
-🤖 <b>ICT PRO BOT V7.0 STARTED</b> 🤖
+if __name__ == '__main__':
+    startup_msg = f"""
+🤖 <b>ICT PRO BOT V7.4 STARTED</b> 🤖
 ━━━━━━━━━━━━━━━━━━━━━
 ✅ Status: Running
 📅 {datetime.now().strftime('%d-%m-%Y %H:%M:%S')}
 🔑 Token: {'✅ Valid' if is_token_valid() else '❌ Login Required → /login'}
-📈 Auto Trading: ENABLED
+📈 Auto Trading: ENABLED (SL/TP/Partial/Reversal)
 ━━━━━━━━━━━━━━━━━━━━━
 """
-    send_telegram_message(message)
-
-if __name__ == '__main__':
-    send_startup_message()
-    Thread(target=daily_summary_scheduler, daemon=True).start()
+    send_telegram_message(startup_msg)
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port, debug=False)
